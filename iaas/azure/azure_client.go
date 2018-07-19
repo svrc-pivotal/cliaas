@@ -1,3 +1,4 @@
+
 package azure
 
 import (
@@ -23,6 +24,7 @@ const DefaultBaseURL = "core.windows.net"
 type Client struct {
 	BlobServiceClient     BlobCopier
 	VirtualMachinesClient ComputeVirtualMachinesClient
+	ImagesClient		  ComputeImagesClient
 	resourceGroupName     string
 	storageContainerName  string
 	storageAccountName    string
@@ -41,6 +43,10 @@ type ComputeVirtualMachinesClient interface {
 	Delete(resourceGroupName string, vmName string, cancel <-chan struct{}) (result autorest.Response, err error)
 	Deallocate(resourceGroupName string, vmName string, cancel <-chan struct{}) (result autorest.Response, err error)
 	List(resourceGroupName string) (result compute.VirtualMachineListResult, err error)
+}
+
+type ComputeImagesClient interface {
+	CreateOrUpdate(resourceGroupName string, imageName string, parameters compute.Image, cancel <-chan struct{}) (result autorest.Response, err error)
 }
 
 var InvalidAzureClientErr = errors.New("invalid azure sdk client defined")
@@ -67,8 +73,13 @@ func NewClient(subscriptionID string, clientID string, clientSecret string, tena
 	}
 	client := compute.NewVirtualMachinesClient(subscriptionID)
 	client.Authorizer = spt
+
+	imageClient := compute.NewImagesClient(subscriptionID)
+	imageClient.Authorizer = spt
+
 	return &Client{
 		VirtualMachinesClient: &client,
+		ImagesClient: &imageClient,
 		resourceGroupName:     resourceGroupName,
 	}, nil
 }
@@ -88,6 +99,9 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 	tmpName := generateInstanceName(*instance.Name)
 	localBlobName := tmpName + "-image.vhd"
 	localDiskName := tmpName + "-osdisk.vhd"
+	localManagedImageName := tmpName + "-image"
+
+
 	err = s.BlobServiceClient.CopyBlob(s.storageContainerName, localBlobName, vhdURL)
 	if err != nil {
 		return errwrap.Wrap(err, "error copying source blob to local blob")
@@ -95,18 +109,57 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 
 	localImageURL := generateLocalImageURL(s.storageAccountName, s.storageBaseURL, s.storageContainerName, localBlobName)
 	localDiskURL := generateLocalImageURL(s.storageAccountName, s.storageBaseURL, s.storageContainerName, localDiskName)
-	newInstance, err := s.generateInstanceCopy(*instance.Name, tmpName, localImageURL, localDiskURL, int32(diskSizeGB))
-	if err != nil {
-		return errwrap.Wrap(err, "failed to generate a new instance object")
-	}
+	newImage := nil
 
-	err = s.Delete(identifier)
-	if err != nil {
-		return errwrap.Wrap(err, "failed removing original VM")
-	}
+	if (*instance.StorageProfile.OsDisk.ManagedDisk != nil) {
+		
+		image := &compute.Image {
+			imageProperties := &ImageProperties {
+				StorageProfile: &ImageStorageProfile {
+					OSDisk: &ImageOSDisk {
+						OsType: "Linux",
+						BlobURI: &localImageURL,
+						OsState: "Generalized"
+					}
+				}
+			}
+		}
+		newImage, err = s.ImagesClient.CreateOrUpdate(s.resourceGroupName, localManagedImageName, imageProperties)
+		if err != nil {
+			return errwrap.Wrap(err, "error creating image from local blob")
+		}
 
-	_, err = s.VirtualMachinesClient.CreateOrUpdate(s.resourceGroupName, *newInstance.Name, *newInstance, nil)
-	return err
+		newInstance, err := s.generateInstanceCopy(*instance.Name, tmpName, nil, nil, newImage, int32(diskSizeGB))
+		if err != nil {
+			return errwrap.Wrap(err, "failed to generate a new instance object")
+		}
+
+		err = s.Delete(identifier)
+		if err != nil {
+			return errwrap.Wrap(err, "failed removing original VM")
+		}
+
+		_, err = s.VirtualMachinesClient.CreateOrUpdate(s.resourceGroupName, *newInstance.Name, *newInstance, nil)
+		return err
+
+	}
+	else {
+
+		newInstance, err := s.generateInstanceCopy(*instance.Name, tmpName, localImageURL, localDiskURL, nil, int32(diskSizeGB))
+		if err != nil {
+			return errwrap.Wrap(err, "failed to generate a new instance object")
+		}
+
+		err = s.Delete(identifier)
+		if err != nil {
+			return errwrap.Wrap(err, "failed removing original VM")
+		}
+
+		_, err = s.VirtualMachinesClient.CreateOrUpdate(s.resourceGroupName, *newInstance.Name, *newInstance, nil)
+		return err
+
+
+	}
 }
 
 func (s *Client) GetDisk(identifier string) (iaas.Disk, error) {
@@ -114,13 +167,7 @@ func (s *Client) GetDisk(identifier string) (iaas.Disk, error) {
 	if err != nil {
 		return iaas.Disk{}, errwrap.Wrap(err, "unable to get virtual machine instance from azure api for disk")
 	}
-
-	diskSize := instance.StorageProfile.OsDisk.DiskSizeGB
-	if diskSize == nil {
-		return iaas.Disk{}, errors.New("unable to get StorageProfile.OsDisk.DiskSizeGB the return valid is nil (Managed disk?)")
-	}
-
-	return iaas.Disk{SizeGB: int64(*diskSize)}, nil
+	return iaas.Disk{SizeGB: int64(*instance.StorageProfile.OsDisk.DiskSizeGB)}, nil
 }
 
 /* End Cliaas Client Interface */
@@ -150,16 +197,26 @@ func (s *Client) SetBlobServiceClient(storageAccountName string, storageAccountK
 	return nil
 }
 
-func (s *Client) generateInstanceCopy(sourceInstanceName string, newInstanceName string, localImageURL string, localOSDiskURL string, diskSizeGB int32) (*compute.VirtualMachine, error) {
+func (s *Client) generateImageCopy(sourceImage *compute.Image, ) (*compute.Image, error) {
+
+}
+
+func (s *Client) generateInstanceCopy(sourceInstanceName string, newInstanceName string, localManagedImageName string, localImageURL string, localOSDiskURL string, localManagedImage *Image, diskSizeGB int32) (*compute.VirtualMachine, error) {
 	instance, err := s.VirtualMachinesClient.Get(s.resourceGroupName, sourceInstanceName, compute.InstanceView)
 	if err != nil {
 		return nil, errwrap.Wrap(err, "unable to get virtual machine instance from azure api")
 	}
 
 	instance.Name = &newInstanceName
-	instance.VirtualMachineProperties.StorageProfile.OsDisk.Image.URI = &localImageURL
 	instance.VirtualMachineProperties.StorageProfile.OsDisk.DiskSizeGB = &diskSizeGB
-	instance.VirtualMachineProperties.StorageProfile.OsDisk.Vhd.URI = &localOSDiskURL
+	if (instance.VirtualMachineProperties.StorageProfile.OsDisk.ManagedDisk != nil ) {
+		instance.VirtualMachineProperties.StorageProfile.ImageReference = &localManagedImage 
+
+	}
+	else {
+		instance.VirtualMachineProperties.StorageProfile.OsDisk.Image.URI = &localImageURL
+		instance.VirtualMachineProperties.StorageProfile.OsDisk.Vhd.URI = &localOSDiskURL
+	}
 	instance.VirtualMachineProperties.VMID = nil
 	instance.Resources = nil
 
