@@ -1,4 +1,3 @@
-
 package azure
 
 import (
@@ -20,16 +19,19 @@ import (
 
 const defaultResourceManagerEndpoint = "https://management.azure.com/"
 const DefaultBaseURL = "core.windows.net"
+const DefaultStorageType = "Standard_LRS"
 
 type Client struct {
 	BlobServiceClient     BlobCopier
 	VirtualMachinesClient ComputeVirtualMachinesClient
-	ImagesClient		  ComputeImagesClient
+	ImagesClient          ComputeImagesClient
 	resourceGroupName     string
 	storageContainerName  string
 	storageAccountName    string
 	storageBaseURL        string
 	vmAdminPassword       string
+	managedDisks          bool
+	storageAccountType    string
 }
 
 type BlobCopier interface {
@@ -79,7 +81,7 @@ func NewClient(subscriptionID string, clientID string, clientSecret string, tena
 
 	return &Client{
 		VirtualMachinesClient: &client,
-		ImagesClient: &imageClient,
+		ImagesClient:          &imageClient,
 		resourceGroupName:     resourceGroupName,
 	}, nil
 }
@@ -98,9 +100,8 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 
 	tmpName := generateInstanceName(*instance.Name)
 	localBlobName := tmpName + "-image.vhd"
-	localDiskName := tmpName + "-osdisk.vhd"
+	localDiskName := tmpName + "-osdisk"
 	localManagedImageName := tmpName + "-image"
-
 
 	err = s.BlobServiceClient.CopyBlob(s.storageContainerName, localBlobName, vhdURL)
 	if err != nil {
@@ -108,28 +109,28 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 	}
 
 	localImageURL := generateLocalImageURL(s.storageAccountName, s.storageBaseURL, s.storageContainerName, localBlobName)
-	localDiskURL := generateLocalImageURL(s.storageAccountName, s.storageBaseURL, s.storageContainerName, localDiskName)
-	newImage := nil
+	localDiskURL := generateLocalImageURL(s.storageAccountName, s.storageBaseURL, s.storageContainerName, localDiskName+".vhd")
+	if &instance.StorageProfile.OsDisk.ManagedDisk != nil || s.managedDisks == true {
 
-	if (*instance.StorageProfile.OsDisk.ManagedDisk != nil) {
-		
-		image := &compute.Image {
-			imageProperties := &ImageProperties {
-				StorageProfile: &ImageStorageProfile {
-					OSDisk: &ImageOSDisk {
-						OsType: "Linux",
+		image := &compute.Image{
+			Location: instance.Location,
+			ImageProperties: &compute.ImageProperties{
+				StorageProfile: &compute.ImageStorageProfile{
+					OsDisk: &compute.ImageOSDisk{
+						OsType:  "Linux",
 						BlobURI: &localImageURL,
-						OsState: "Generalized"
-					}
-				}
-			}
+						OsState: "Generalized",
+					},
+				},
+			},
 		}
-		newImage, err = s.ImagesClient.CreateOrUpdate(s.resourceGroupName, localManagedImageName, imageProperties)
+
+		_, err := s.ImagesClient.CreateOrUpdate(s.resourceGroupName, localManagedImageName, *image, nil)
 		if err != nil {
 			return errwrap.Wrap(err, "error creating image from local blob")
 		}
 
-		newInstance, err := s.generateInstanceCopy(*instance.Name, tmpName, nil, nil, newImage, int32(diskSizeGB))
+		newInstance, err := s.generateInstanceCopyFromManagedImage(*instance.Name, tmpName, localDiskName, image, int32(diskSizeGB))
 		if err != nil {
 			return errwrap.Wrap(err, "failed to generate a new instance object")
 		}
@@ -142,10 +143,9 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 		_, err = s.VirtualMachinesClient.CreateOrUpdate(s.resourceGroupName, *newInstance.Name, *newInstance, nil)
 		return err
 
-	}
-	else {
+	} else {
 
-		newInstance, err := s.generateInstanceCopy(*instance.Name, tmpName, localImageURL, localDiskURL, nil, int32(diskSizeGB))
+		newInstance, err := s.generateInstanceCopyFromUnmanagedImage(*instance.Name, tmpName, localImageURL, localDiskURL, int32(diskSizeGB))
 		if err != nil {
 			return errwrap.Wrap(err, "failed to generate a new instance object")
 		}
@@ -157,7 +157,6 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 
 		_, err = s.VirtualMachinesClient.CreateOrUpdate(s.resourceGroupName, *newInstance.Name, *newInstance, nil)
 		return err
-
 
 	}
 }
@@ -174,6 +173,14 @@ func (s *Client) GetDisk(identifier string) (iaas.Disk, error) {
 
 func (s *Client) SetVMAdminPassword(password string) {
 	s.vmAdminPassword = password
+}
+
+func (s *Client) SetManagedDisks(managedDisks bool) {
+	s.managedDisks = managedDisks
+}
+
+func (s *Client) SetStorageAccountType(storageAccountType string) {
+	s.storageAccountType = storageAccountType
 }
 
 func (s *Client) SetStorageContainerName(name string) {
@@ -197,11 +204,42 @@ func (s *Client) SetBlobServiceClient(storageAccountName string, storageAccountK
 	return nil
 }
 
-func (s *Client) generateImageCopy(sourceImage *compute.Image, ) (*compute.Image, error) {
+func (s *Client) generateInstanceCopyFromManagedImage(sourceInstanceName string, newInstanceName string, localOSDiskName string, localManagedImage *compute.Image, diskSizeGB int32) (*compute.VirtualMachine, error) {
+	instance, err := s.VirtualMachinesClient.Get(s.resourceGroupName, sourceInstanceName, compute.InstanceView)
+	if err != nil {
+		return nil, errwrap.Wrap(err, "unable to get virtual machine instance from azure api")
+	}
 
+	instance.Name = &newInstanceName
+	instance.VirtualMachineProperties.StorageProfile.OsDisk = &compute.OSDisk{
+		ManagedDisk: &compute.ManagedDiskParameters{
+			StorageAccountType: compute.StorageAccountTypes(s.storageAccountType),
+		},
+		CreateOption: "fromImage",
+		Name:         &localOSDiskName,
+	}
+	nullString := "null"
+	instance.VirtualMachineProperties.StorageProfile.ImageReference = &compute.ImageReference{
+		ID: localManagedImage.ID,
+	}
+
+	instance.VirtualMachineProperties.VMID = nil
+	instance.Resources = nil
+
+	if s.vmAdminPassword == "" {
+		s.vmAdminPassword = getGUID()
+	}
+	adminUsername := "ubuntu"
+	instance.VirtualMachineProperties.OsProfile = &compute.OSProfile{
+		AdminUsername: &adminUsername,
+		AdminPassword: &s.vmAdminPassword,
+		ComputerName:  &newInstanceName,
+	}
+
+	return &instance, nil
 }
 
-func (s *Client) generateInstanceCopy(sourceInstanceName string, newInstanceName string, localManagedImageName string, localImageURL string, localOSDiskURL string, localManagedImage *Image, diskSizeGB int32) (*compute.VirtualMachine, error) {
+func (s *Client) generateInstanceCopyFromUnmanagedImage(sourceInstanceName string, newInstanceName string, localImageURL string, localOSDiskURL string, diskSizeGB int32) (*compute.VirtualMachine, error) {
 	instance, err := s.VirtualMachinesClient.Get(s.resourceGroupName, sourceInstanceName, compute.InstanceView)
 	if err != nil {
 		return nil, errwrap.Wrap(err, "unable to get virtual machine instance from azure api")
@@ -209,14 +247,9 @@ func (s *Client) generateInstanceCopy(sourceInstanceName string, newInstanceName
 
 	instance.Name = &newInstanceName
 	instance.VirtualMachineProperties.StorageProfile.OsDisk.DiskSizeGB = &diskSizeGB
-	if (instance.VirtualMachineProperties.StorageProfile.OsDisk.ManagedDisk != nil ) {
-		instance.VirtualMachineProperties.StorageProfile.ImageReference = &localManagedImage 
+	instance.VirtualMachineProperties.StorageProfile.OsDisk.Image.URI = &localImageURL
+	instance.VirtualMachineProperties.StorageProfile.OsDisk.Vhd.URI = &localOSDiskURL
 
-	}
-	else {
-		instance.VirtualMachineProperties.StorageProfile.OsDisk.Image.URI = &localImageURL
-		instance.VirtualMachineProperties.StorageProfile.OsDisk.Vhd.URI = &localOSDiskURL
-	}
 	instance.VirtualMachineProperties.VMID = nil
 	instance.Resources = nil
 

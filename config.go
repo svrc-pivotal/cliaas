@@ -65,6 +65,8 @@ type AzureConfig struct {
 	StorageAccountName      string `yaml:"storage_account_name"`
 	StorageAccountKey       string `yaml:"storage_account_key"`
 	StorageContainerName    string `yaml:"storage_container_name"`
+	ManagedDisks            bool   `yaml:"managed_disks"`
+	StorageAccountType      string `yaml:"storage_account_type"`
 	StorageURL              string `yaml:"storage_url"`
 	VMAdminPassword         string `yaml:"vm_admin_password"`
 }
@@ -81,8 +83,8 @@ func (c *AzureConfig) Complete() bool {
 		c.ResourceGroupName != "" &&
 		c.StorageAccountName != "" &&
 		c.StorageAccountKey != "" &&
-		c.VHDImageURL != "" &&
-		c.StorageContainerName != ""
+		c.StorageContainerName != "" &&
+		c.VHDImageURL != ""
 }
 
 func (c *AzureConfig) NewClient() (Client, error) {
@@ -93,6 +95,12 @@ func (c *AzureConfig) NewClient() (Client, error) {
 
 	if c.StorageURL == "" {
 		c.StorageURL = azure.DefaultBaseURL
+	}
+	client.SetManagedDisks(c.ManagedDisks)
+	if c.StorageAccountType != "" {
+		client.SetStorageAccountType(c.StorageAccountType)
+	} else {
+		client.SetStorageAccountType(azure.DefaultStorageType)
 	}
 	client.SetStorageContainerName(c.StorageContainerName)
 	client.SetStorageAccountName(c.StorageAccountName)
