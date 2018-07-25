@@ -55,7 +55,7 @@ var _ = Describe("Azure", func() {
 				BeforeEach(func() {
 					fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
 					fakeBlobServiceClient = new(azurefakes.FakeBlobCopier)
-					vm := newVirtualMachine(controlID, controlOldName, controlOldImageURL, nil, controlDiskSize)
+					vm := newVirtualMachine(controlID, controlOldName, controlOldImageURL, "nil", controlDiskSize)
 					fakeVirtualMachinesClient.GetReturns(vm, nil)
 					controlValue = append(controlValue, vm)
 				})
@@ -136,7 +136,7 @@ var _ = Describe("Azure", func() {
 			Context("when there are multiple matches for the identifier regex", func() {
 				BeforeEach(func() {
 					fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
-					vm := newVirtualMachine(controlID, controlOldName, controlOldImageURL, nil, controlDiskSize)
+					vm := newVirtualMachine(controlID, controlOldName, controlOldImageURL, "nil", controlDiskSize)
 					controlValue = append(controlValue, vm, vm)
 				})
 
@@ -154,6 +154,7 @@ var _ = Describe("Azure", func() {
 			var identifier string
 			var fakeVirtualMachinesClient *azurefakes.FakeComputeVirtualMachinesClient
 			var fakeBlobServiceClient *azurefakes.FakeBlobCopier
+			var fakeImageServiceClient *azurefakes.FakeComputeImagesClient
 			var controlNewImageURL = "some-control-new-image-url"
 			var controlRegex = "ops*"
 			var controlValue []compute.VirtualMachine
@@ -163,7 +164,7 @@ var _ = Describe("Azure", func() {
 			var controlOldName = "ops-manager"
 			var controlContainerName = "mycontainer"
 			var controlStorageAccountName = "myaccount"
-			var controlNewImageLocalContainerURL = fmt.Sprintf("https://%s.blob.core.windows.net/%s/%s", controlStorageAccountName, controlContainerName, controlOldName+"_....*")
+			//var controlNewImageLocalContainerURL = fmt.Sprintf("https://%s.blob.core.windows.net/%s/%s", controlStorageAccountName, controlContainerName, controlOldName+"_....*")
 
 			JustBeforeEach(func() {
 				fakeVirtualMachinesClient.ListReturns(compute.VirtualMachineListResult{Value: &controlValue}, nil)
@@ -172,6 +173,7 @@ var _ = Describe("Azure", func() {
 				identifier = controlRegex
 				azureClient.VirtualMachinesClient = fakeVirtualMachinesClient
 				azureClient.BlobServiceClient = fakeBlobServiceClient
+				azureClient.ImagesClient = fakeImageServiceClient
 				azureClient.SetStorageAccountName(controlStorageAccountName)
 				azureClient.SetStorageContainerName(controlContainerName)
 				azureClient.SetStorageBaseURL(azure.DefaultBaseURL)
@@ -187,7 +189,8 @@ var _ = Describe("Azure", func() {
 				BeforeEach(func() {
 					fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
 					fakeBlobServiceClient = new(azurefakes.FakeBlobCopier)
-					vm := newVirtualMachine(controlID, controlOldName, nil, controlManagedImageName, controlDiskSize)
+					fakeImageServiceClient = new(azurefakes.FakeComputeImagesClient)
+					vm := newVirtualMachine(controlID, controlOldName, "nil", controlManagedImageName, controlDiskSize)
 					fakeVirtualMachinesClient.GetReturns(vm, nil)
 					controlValue = append(controlValue, vm)
 				})
@@ -208,6 +211,12 @@ var _ = Describe("Azure", func() {
 					Expect(container).Should(Equal(controlContainerName))
 					Expect(localImageFilename).Should(MatchRegexp(controlNewNameRegex))
 					Expect(sourceBlob).Should(Equal(controlNewImageURL))
+				})
+
+				It("should create a new managed image from the given public vhd URL", func() {
+					Expect(fakeImageServiceClient.CreateOrUpdateCallCount()).Should(Equal(1), "we should call createorupdate exactly once")
+					_, localManagedImageName, _, _ := fakeImageServiceClient.CreateOrUpdateArgsForCall(0)
+					Expect(localManagedImageName).Should(MatchRegexp(controlRegex))
 				})
 
 				It("should spin down & delete the matching vm instance", func() {
@@ -237,11 +246,9 @@ var _ = Describe("Azure", func() {
 				It("should replace the disk image on the new vm instance's config with the local copy of the given Public VHD", func() {
 					Expect(fakeVirtualMachinesClient.CreateOrUpdateCallCount()).Should(Equal(1), "we should call createorupdate exactly once")
 					_, _, parameters, _ := fakeVirtualMachinesClient.CreateOrUpdateArgsForCall(0)
-					var managedImageName = *parameters.VirtualMachineProperties.StorageProfile.OsDisk.ManagedImage.Name
+					var managedImageID = *parameters.VirtualMachineProperties.StorageProfile.ImageReference.ID
 					var imageDiskSize = *parameters.VirtualMachineProperties.StorageProfile.OsDisk.DiskSizeGB
-					Expect(managedImageName).ShouldNot(Equal(controlOldManagedImageName))
-					Expect(managedImageName).ShouldNot(Equal(controlNewManagedImageName))
-					Expect(imageURL).Should(MatchRegexp(controlNewImageLocalContainerURL))
+					Expect(managedImageID).Should(MatchRegexp(controlNewNameRegex))
 					Expect(imageDiskSize).Should(Equal(controlDiskSize))
 				})
 
@@ -268,7 +275,7 @@ var _ = Describe("Azure", func() {
 			Context("when there are multiple matches for the identifier regex", func() {
 				BeforeEach(func() {
 					fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
-					vm := newVirtualMachine(controlID, controlOldName, nil, controlManagedImageName, controlDiskSize)
+					vm := newVirtualMachine(controlID, controlOldName, "nil", controlManagedImageName, controlDiskSize)
 					controlValue = append(controlValue, vm, vm)
 				})
 
@@ -301,8 +308,8 @@ var _ = Describe("Azure", func() {
 			Context("when azure running VMs list returns more than a single page of results", func() {
 				BeforeEach(func() {
 					identifier = "testid"
-					vmMatch := newVirtualMachine(identifier, identifier, "testurl", nil , controlDiskSize)
-					vmNothing := newVirtualMachine("nomatch", "nomatch", "testurl", nil , controlDiskSize)
+					vmMatch := newVirtualMachine(identifier, identifier, "testurl", "nil", controlDiskSize)
+					vmNothing := newVirtualMachine("nomatch", "nomatch", "testurl", "nil", controlDiskSize)
 					fakeVirtualMachinesClient.ListReturns(compute.VirtualMachineListResult{Value: &[]compute.VirtualMachine{vmNothing}}, nil)
 					fakeVirtualMachinesClient.ListAllNextResultsReturnsOnCall(
 						0,
@@ -410,7 +417,7 @@ var _ = Describe("Azure", func() {
 				identifier = "testid"
 				url = "testurl"
 				fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
-				vm = newVirtualMachine(identifier, identifier, url, nil, controlDiskSize)
+				vm = newVirtualMachine(identifier, identifier, url, "nil", controlDiskSize)
 				azureClient.VirtualMachinesClient = fakeVirtualMachinesClient
 				controlValue = append(controlValue, vm)
 			})
@@ -446,7 +453,7 @@ var _ = Describe("Azure", func() {
 				identifier = "testid"
 				url = "testurl"
 				fakeVirtualMachinesClient = new(azurefakes.FakeComputeVirtualMachinesClient)
-				vm = newVirtualMachine(identifier, identifier, nil, url, controlDiskSize)
+				vm = newVirtualMachine(identifier, identifier, "nil", url, controlDiskSize)
 				azureClient.VirtualMachinesClient = fakeVirtualMachinesClient
 				controlValue = append(controlValue, vm)
 			})
@@ -529,7 +536,7 @@ func newVirtualMachine(id string, name string, vmDiskURL string, managedImageNam
 	tmpURL := vmDiskURL
 	tmpManagedImageName := managedImageName
 
-	if (tmpManagedImageName != nil) {
+	if tmpManagedImageName != "nil" {
 		vm := compute.VirtualMachine{
 			ID:   &tmpID,
 			Name: &tmpName,
@@ -544,16 +551,15 @@ func newVirtualMachine(id string, name string, vmDiskURL string, managedImageNam
 				StorageProfile: &compute.StorageProfile{
 					OsDisk: &compute.OSDisk{
 						DiskSizeGB: &diskSize,
-						
-						ManagedImage: &tmpManagedImageName
-						
+					},
+					ImageReference: &compute.ImageReference{
+						ID: &managedImageName,
 					},
 				},
 			},
 		}
 		return vm
-	}
-	else {
+	} else {
 		vm := compute.VirtualMachine{
 			ID:   &tmpID,
 			Name: &tmpName,

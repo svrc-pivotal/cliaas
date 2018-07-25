@@ -49,6 +49,7 @@ type ComputeVirtualMachinesClient interface {
 
 type ComputeImagesClient interface {
 	CreateOrUpdate(resourceGroupName string, imageName string, parameters compute.Image, cancel <-chan struct{}) (result autorest.Response, err error)
+	Get(resourceGroupName string, imageName string, expand string) (result compute.Image, err error)
 }
 
 var InvalidAzureClientErr = errors.New("invalid azure sdk client defined")
@@ -94,6 +95,7 @@ func (s *Client) Delete(identifier string) error {
 
 func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) error {
 	instance, err := s.deallocate(identifier)
+
 	if err != nil {
 		return errwrap.Wrap(err, "error shutting down VM")
 	}
@@ -130,7 +132,12 @@ func (s *Client) Replace(identifier string, vhdURL string, diskSizeGB int64) err
 			return errwrap.Wrap(err, "error creating image from local blob")
 		}
 
-		newInstance, err := s.generateInstanceCopyFromManagedImage(*instance.Name, tmpName, localDiskName, image, int32(diskSizeGB))
+		newImage, err := s.ImagesClient.Get(s.resourceGroupName, localManagedImageName, "")
+		if err != nil {
+			return errwrap.Wrap(err, "error retrieving newly created image")
+		}
+
+		newInstance, err := s.generateInstanceCopyFromManagedImage(*instance.Name, identifier, tmpName, localDiskName, &newImage, int32(diskSizeGB))
 		if err != nil {
 			return errwrap.Wrap(err, "failed to generate a new instance object")
 		}
@@ -204,7 +211,7 @@ func (s *Client) SetBlobServiceClient(storageAccountName string, storageAccountK
 	return nil
 }
 
-func (s *Client) generateInstanceCopyFromManagedImage(sourceInstanceName string, newInstanceName string, localOSDiskName string, localManagedImage *compute.Image, diskSizeGB int32) (*compute.VirtualMachine, error) {
+func (s *Client) generateInstanceCopyFromManagedImage(sourceInstanceName string, identifier string, newInstanceName string, localOSDiskName string, localManagedImage *compute.Image, diskSizeGB int32) (*compute.VirtualMachine, error) {
 	instance, err := s.VirtualMachinesClient.Get(s.resourceGroupName, sourceInstanceName, compute.InstanceView)
 	if err != nil {
 		return nil, errwrap.Wrap(err, "unable to get virtual machine instance from azure api")
@@ -217,8 +224,8 @@ func (s *Client) generateInstanceCopyFromManagedImage(sourceInstanceName string,
 		},
 		CreateOption: "fromImage",
 		Name:         &localOSDiskName,
+		DiskSizeGB:   &diskSizeGB,
 	}
-	nullString := "null"
 	instance.VirtualMachineProperties.StorageProfile.ImageReference = &compute.ImageReference{
 		ID: localManagedImage.ID,
 	}
@@ -229,12 +236,14 @@ func (s *Client) generateInstanceCopyFromManagedImage(sourceInstanceName string,
 	if s.vmAdminPassword == "" {
 		s.vmAdminPassword = getGUID()
 	}
-	adminUsername := "ubuntu"
-	instance.VirtualMachineProperties.OsProfile = &compute.OSProfile{
-		AdminUsername: &adminUsername,
-		AdminPassword: &s.vmAdminPassword,
-		ComputerName:  &newInstanceName,
-	}
+	instance.VirtualMachineProperties.OsProfile.AdminPassword = &s.vmAdminPassword
+
+	// adminUsername := "ubuntu"
+	// instance.VirtualMachineProperties.OsProfile = &compute.OSProfile{
+	// 	AdminUsername: &adminUsername,
+	// 	AdminPassword: &s.vmAdminPassword,
+	// 	ComputerName:  &identifier,
+	// }
 
 	return &instance, nil
 }
